@@ -144,14 +144,16 @@ deliver() {
 
 scan() {
     # Take the new stamp before scanning so a file landing mid-scan is caught next time.
-    local next="$STATE/stamp.next" paths="" f inode q agent prev size out esc
+    local next="$STATE/stamp.next" paths="" f key q agent prev size out esc
     touch "$next"
 
     # ctime, not mtime: AirDrop keeps the photo's original modified date, but
     # the inode change time is always when it landed here.
     while IFS= read -r -d '' f; do
-        inode=$(stat -f '%i' "$f" 2>/dev/null) || continue
-        grep -qx "$inode" "$SEEN" && continue
+        # Name, size and modified date, not the inode: AirDrop can swap the file
+        # for an identical copy a moment after it lands, which changes the inode.
+        key=$(stat -f '%N|%z|%m' "$f" 2>/dev/null) || continue
+        grep -qxF "$key" "$SEEN" && continue
 
         q=$(xattr -p com.apple.quarantine "$f" 2>/dev/null)
         # AirDrop writes the file first and tags it a moment later, so an
@@ -159,9 +161,9 @@ scan() {
         if [ -z "$q" ]; then sleep 1; q=$(xattr -p com.apple.quarantine "$f" 2>/dev/null); fi
         agent=$(echo "$q" | cut -d';' -f3)
         if [ -z "$q" ]; then
-            if [ "$INCLUDE_LOCAL" != 1 ]; then log "skip (made on this Mac): $f"; echo "$inode" >> "$SEEN"; continue; fi
+            if [ "$INCLUDE_LOCAL" != 1 ]; then log "skip (made on this Mac): $f"; echo "$key" >> "$SEEN"; continue; fi
         elif echo "$agent" | grep -qiE "$SKIP_AGENTS"; then
-            log "skip (from $agent): $f"; echo "$inode" >> "$SEEN"; continue
+            log "skip (from $agent): $f"; echo "$key" >> "$SEEN"; continue
         fi
 
         # Wait for the copy to finish.
@@ -172,7 +174,7 @@ scan() {
             prev=$size
             sleep 0.3
         done
-        echo "$inode" >> "$SEEN"
+        echo "$key" >> "$SEEN"
 
         # Claude Code does not read HEIC, so hand it a JPEG instead.
         case "$f" in
