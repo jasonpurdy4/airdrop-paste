@@ -1,22 +1,27 @@
 #!/bin/bash
-# airdrop-paste — drop AirDropped images straight into the Claude prompt.
+# airdrop-paste — drop AirDropped images straight into your terminal prompt.
 #
 # Watches ~/Downloads. Each new image that arrived by AirDrop is pasted, as a
-# file path, into the Ghostty terminal you are looking at. Claude Code turns a
-# pasted image path into an attachment. Nothing is submitted: the path just
-# sits in the input box.
+# file path, into the terminal you were last looking at. Claude Code (and most
+# coding agents) turn a pasted image path into an attachment. Nothing is
+# submitted: the path just sits in the input box.
 #
-# Works the same inside tmux or out of it, because Ghostty does the paste.
+# How the paste happens depends on the terminal:
+#   Ghostty, iTerm2   their own "type this text" command, no permissions needed
+#   anything + tmux   tmux pastes into the pane of its most recently used client
+#   everything else   the path goes on the clipboard and Cmd+V is pressed for
+#                     you, which needs Accessibility permission once
 #
-# Started from your shell profile, NOT launchd, on purpose: macOS will not let a launchd
-# job read ~/Downloads ("Operation not permitted"), but anything started from a
-# Ghostty shell borrows Ghostty's permission. One copy runs at a time and it
-# exits when Ghostty quits.
+# Started from your shell profile, NOT launchd, on purpose: macOS will not let a
+# launchd job read ~/Downloads ("Operation not permitted"), but anything started
+# from a terminal borrows that terminal's permission. One copy runs at a time
+# and it exits when the terminal that started it quits.
 #
+# Usage: airdrop-paste [start [shell-pid]] | stop
 # Log:   ~/Library/Logs/airdrop-paste.log
-# Stop:  airdrop-paste stop
 
 set -u
+export LC_ALL=en_US.UTF-8
 
 WATCH="$HOME/Downloads"
 STATE="$HOME/Library/Caches/airdrop-paste"
@@ -31,6 +36,13 @@ INCLUDE_LOCAL="${AIRDROP_PASTE_INCLUDE_LOCAL:-0}"
 # Anything a browser or chat app downloaded is not an AirDrop.
 SKIP_AGENTS='Safari|Chrome|Firefox|Arc|Brave|Edge|Atlas|Slack|Mail|Messages|Discord|WhatsApp|Telegram|zoom'
 
+GHOSTTY='com.mitchellh.ghostty'
+ITERM='com.googlecode.iterm2'
+# Apps that count as "a terminal you are looking at", by bundle id: Ghostty,
+# iTerm2, Terminal, VS Code, Cursor, Windsurf, Warp, kitty, Alacritty, WezTerm,
+# Zed, Hyper.
+TERMINALS="$GHOSTTY|$ITERM|com.apple.Terminal|com.microsoft.VSCode|com.microsoft.VSCodeInsiders|com.todesktop.230313mzl4w4u92|com.exafunction.windsurf|dev.warp.Warp-Stable|net.kovidgoyal.kitty|org.alacritty|io.alacritty|com.github.wez.wezterm|dev.zed.Zed|co.zeit.hyper"
+
 mkdir -p "$STATE"
 touch "$SEEN"
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"; }
@@ -42,16 +54,97 @@ running_pid() {
 }
 
 if [ "${1:-}" = "stop" ]; then
-    pid=$(running_pid) && kill "$pid" && echo "stopped" || echo "not running"
+    pid=$(running_pid) || { echo "not running"; exit 0; }
+    kill "$pid"
+    # It finishes its current sleep before exiting; wait so a restart right after this works.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pid" 2>/dev/null || break; sleep 0.3; done
+    echo "stopped"
     exit 0
 fi
 
 running_pid >/dev/null && exit 0
 echo $$ > "$PIDFILE"
 
+# The app (or tmux server) this was started from: walk up to the last ancestor
+# before launchd. We live exactly as long as it does.
+HOST="${2:-$PPID}"
+while :; do
+    parent=$(ps -o ppid= -p "$HOST" 2>/dev/null | tr -d ' ')
+    [ -z "$parent" ] || [ "$parent" -le 1 ] && break
+    HOST=$parent
+done
+
+front_app() { lsappinfo info -only bundleid "$(lsappinfo front)" 2>/dev/null | cut -d'"' -f4; }
+
+paste_ghostty() {
+    /usr/bin/osascript - "$1" <<'EOF'
+on run argv
+    tell application id "com.mitchellh.ghostty"
+        input text (item 1 of argv) to focused terminal of selected tab of front window
+    end tell
+end run
+EOF
+}
+
+# iTerm2 types the text rather than pasting it, so wrap it in the bracketed
+# paste markers ourselves.
+paste_iterm() {
+    /usr/bin/osascript - "$(printf '\033[200~%s\033[201~' "$1")" <<'EOF'
+on run argv
+    tell application id "com.googlecode.iterm2"
+        tell current session of current window to write text (item 1 of argv) newline NO
+    end tell
+end run
+EOF
+}
+
+paste_tmux() {
+    local session
+    command -v tmux >/dev/null || return 1
+    session=$(tmux list-clients -F '#{client_activity} #{client_session}' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+    [ -n "$session" ] || return 1
+    tmux set-buffer -b airdrop-paste -- "$1" && tmux paste-buffer -p -d -b airdrop-paste -t "=$session:"
+}
+
+# Last resort: clipboard plus a synthetic Cmd+V. If the keystroke is refused,
+# the path stays on the clipboard so a manual Cmd+V still works.
+paste_keystroke() {
+    local app=$1 text=$2 old
+    old=$(pbpaste 2>/dev/null)
+    printf '%s' "$text" | pbcopy
+    /usr/bin/osascript - "$app" <<'EOF' || return 1
+on run argv
+    tell application id (item 1 of argv) to activate
+    delay 0.4
+    tell application "System Events" to keystroke "v" using command down
+    delay 0.3
+end run
+EOF
+    [ -n "$old" ] && printf '%s' "$old" | pbcopy
+    return 0
+}
+
+deliver() {
+    local text=$1 app=$LAST_TERM err
+    if [ -z "$app" ]; then
+        if pgrep -xq ghostty; then app=$GHOSTTY
+        elif pgrep -xq iTerm2; then app=$ITERM
+        fi
+    fi
+    case "$app" in
+        "$GHOSTTY") err=$(paste_ghostty "$text" 2>&1) || log "paste into Ghostty failed: $err" ;;
+        "$ITERM")   err=$(paste_iterm "$text" 2>&1) || log "paste into iTerm2 failed: $err" ;;
+        *)
+            paste_tmux "$text" 2>/dev/null && return
+            if [ -z "$app" ]; then log "no terminal to paste into"; return; fi
+            err=$(paste_keystroke "$app" "$text" 2>&1) || log "Cmd+V into $app failed, path left on the clipboard. Allow your terminal under System Settings > Privacy & Security > Accessibility. ($err)"
+            ;;
+    esac
+}
+
 scan() {
     # Take the new stamp before scanning so a file landing mid-scan is caught next time.
-    local next="$STATE/stamp.next" paths="" f inode q agent prev size out esc err
+    local next="$STATE/stamp.next" paths="" f inode q agent prev size out esc
     touch "$next"
 
     # ctime, not mtime: AirDrop keeps the photo's original modified date, but
@@ -89,7 +182,7 @@ scan() {
                 ;;
         esac
 
-        log "paste (agent: ${agent:-none}): $f"
+        log "paste (agent: ${agent:-none}, into: ${LAST_TERM:-first terminal found}): $f"
         # Escape the way a Finder drag into a terminal does.
         esc=$(printf '%s' "$f" | sed 's/[^A-Za-z0-9_.\/-]/\\&/g')
         paths="$paths$esc "
@@ -101,24 +194,22 @@ scan() {
     [ -z "$paths" ] && return
 
     tail -n 500 "$SEEN" > "$SEEN.tmp" && mv "$SEEN.tmp" "$SEEN"
-    err=$(/usr/bin/osascript - "$paths" 2>&1 <<'EOF'
-on run argv
-    tell application "Ghostty"
-        input text (item 1 of argv) to focused terminal of selected tab of front window
-    end tell
-end run
-EOF
-    ) || log "paste failed: $err"
+    deliver "$paths"
 }
 
 # Start the clock now so the existing backlog is never pasted.
 touch "$STAMP"
-log "watching $WATCH (pid $$)"
+log "watching $WATCH (pid $$, started from $(ps -o comm= -p "$HOST" 2>/dev/null))"
 trap 'rm -f "$PIDFILE"; log "stopped"; exit 0' TERM INT
 
-while pgrep -xq ghostty; do
+LAST_TERM=""
+while kill -0 "$HOST" 2>/dev/null; do
+    # Remember the last terminal that was in front; AirDrop itself can pull
+    # Finder forward, so "frontmost right now" is not good enough.
+    front=$(front_app)
+    echo "$front" | grep -qxE "$TERMINALS" && LAST_TERM=$front
     scan
     sleep 1
 done
 rm -f "$PIDFILE"
-log "Ghostty quit, stopping"
+log "the terminal that started this quit, stopping"
