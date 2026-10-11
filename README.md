@@ -40,6 +40,8 @@ For the Cmd+V terminals:
 3. macOS tags each downloaded file with the app that received it. AirDrop's tag is `sharingd`. Files tagged by a browser or chat app are skipped, and so are untagged files, which were made on the Mac itself.
 4. It also remembers which terminal app was last in front. Each AirDropped image's path is pasted there, using the method in the table above. Claude Code turns a pasted image path into an attachment.
 
+5. AirDrop opens a Finder window on the new file and takes focus with it. `airdrop-paste` closes that window and puts you back in the app you were using. macOS asks once for permission to control Finder.
+
 Nothing is ever submitted for you. The path sits in the input box until you press return.
 
 HEIC photos are converted to JPEG first.
@@ -53,6 +55,7 @@ A launchd job would be the tidy way to watch a folder, but macOS does not let ba
 | What | How |
 | --- | --- |
 | Also paste screenshots taken on the Mac | `export AIRDROP_PASTE_INCLUDE_LOCAL=1` in `~/.zshrc`, above the startup line |
+| Leave the AirDrop Finder window open | `export AIRDROP_PASTE_KEEP_FINDER=1` in `~/.zshrc`, above the startup line |
 | Stop it | `airdrop-paste stop` |
 | See what it did and why | `~/Library/Logs/airdrop-paste.log` |
 

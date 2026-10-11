@@ -124,6 +124,37 @@ EOF
     return 0
 }
 
+# AirDrop opens a Finder window on the new file and takes focus with it. Close
+# that window (only if it is showing Downloads with our file selected) and hand
+# focus back to whatever was in front. AIRDROP_PASTE_KEEP_FINDER=1 leaves it alone.
+close_finder() {
+    local file=$1 back=$2 out
+    [ "${AIRDROP_PASTE_KEEP_FINDER:-0}" = 1 ] && return
+    for _ in 1 2 3 4 5 6 7 8; do
+        out=$(/usr/bin/osascript - "$(basename "$file")" "$WATCH/" "$back" 2>&1 <<'EOF'
+on run argv
+    tell application "Finder"
+        if (count of Finder windows) is 0 then return "waiting"
+        set w to front Finder window
+        set sel to selection
+        if (count of sel) is not 1 then return "waiting"
+        if (name of item 1 of sel) is not (item 1 of argv) then return "waiting"
+        if (POSIX path of (target of w as alias)) is not (item 2 of argv) then return "waiting"
+        close w
+    end tell
+    if (item 3 of argv) is not "" then tell application id (item 3 of argv) to activate
+    return "closed"
+end run
+EOF
+        )
+        case "$out" in
+            closed) return ;;
+            waiting) sleep 0.5 ;;
+            *) log "could not close the Finder window: $out"; return ;;
+        esac
+    done
+}
+
 deliver() {
     local text=$1 app=$LAST_TERM err
     if [ -z "$app" ]; then
@@ -144,7 +175,7 @@ deliver() {
 
 scan() {
     # Take the new stamp before scanning so a file landing mid-scan is caught next time.
-    local next="$STATE/stamp.next" paths="" f last q agent prev size out esc
+    local next="$STATE/stamp.next" paths="" f last revealed="" q agent prev size out esc
     touch "$next"
 
     # ctime, not mtime: AirDrop keeps the photo's original modified date, but
@@ -179,6 +210,7 @@ scan() {
         [ "$size" -gt 0 ] || continue
         printf '%s\t%s\n' "$(date +%s)" "$f" >> "$SEEN"
 
+        revealed=$f
         # Claude Code does not read HEIC, so hand it a JPEG instead.
         case "$f" in
             *.[hH][eE][iI][cC])
@@ -200,6 +232,7 @@ scan() {
 
     tail -n 500 "$SEEN" > "$SEEN.tmp" && mv "$SEEN.tmp" "$SEEN"
     deliver "$paths"
+    close_finder "$revealed" "$LAST_FRONT" &
 }
 
 # Start the clock now so the existing backlog is never pasted.
@@ -208,11 +241,13 @@ log "watching $WATCH (pid $$, started from $(ps -o comm= -p "$HOST" 2>/dev/null)
 trap 'rm -f "$PIDFILE"; log "stopped"; exit 0' TERM INT
 
 LAST_TERM=""
+LAST_FRONT=""
 while kill -0 "$HOST" 2>/dev/null; do
     # Remember the last terminal that was in front; AirDrop itself can pull
     # Finder forward, so "frontmost right now" is not good enough.
     front=$(front_app)
     echo "$front" | grep -qxE "$TERMINALS" && LAST_TERM=$front
+    [ -n "$front" ] && [ "$front" != com.apple.finder ] && LAST_FRONT=$front
     scan
     sleep 1
 done
