@@ -144,16 +144,17 @@ deliver() {
 
 scan() {
     # Take the new stamp before scanning so a file landing mid-scan is caught next time.
-    local next="$STATE/stamp.next" paths="" f key q agent prev size out esc
+    local next="$STATE/stamp.next" paths="" f last q agent prev size out esc
     touch "$next"
 
     # ctime, not mtime: AirDrop keeps the photo's original modified date, but
     # the inode change time is always when it landed here.
     while IFS= read -r -d '' f; do
-        # Name, size and modified date, not the inode: AirDrop can swap the file
-        # for an identical copy a moment after it lands, which changes the inode.
-        key=$(stat -f '%N|%z|%m' "$f" 2>/dev/null) || continue
-        grep -qxF "$key" "$SEEN" && continue
+        # One paste per name every two minutes. AirDrop shows the file twice:
+        # an empty placeholder when the transfer starts, then the real image,
+        # sometimes swapped in again a moment later.
+        last=$(awk -F'\t' -v p="$f" '$2 == p { t = $1 } END { print t }' "$SEEN")
+        [ -n "$last" ] && [ $(( $(date +%s) - last )) -lt 120 ] && continue
 
         q=$(xattr -p com.apple.quarantine "$f" 2>/dev/null)
         # AirDrop writes the file first and tags it a moment later, so an
@@ -174,7 +175,9 @@ scan() {
             prev=$size
             sleep 0.3
         done
-        echo "$key" >> "$SEEN"
+        # Still the empty placeholder: leave it, the finished file shows up as a change.
+        [ "$size" -gt 0 ] || continue
+        printf '%s\t%s\n' "$(date +%s)" "$f" >> "$SEEN"
 
         # Claude Code does not read HEIC, so hand it a JPEG instead.
         case "$f" in
