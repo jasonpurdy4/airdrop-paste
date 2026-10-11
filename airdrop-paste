@@ -161,9 +161,9 @@ scan() {
         if [ -z "$q" ]; then sleep 1; q=$(xattr -p com.apple.quarantine "$f" 2>/dev/null); fi
         agent=$(echo "$q" | cut -d';' -f3)
         if [ -z "$q" ]; then
-            if [ "$INCLUDE_LOCAL" != 1 ]; then log "skip (made on this Mac): $f"; echo "$key" >> "$SEEN"; continue; fi
+            if [ "$INCLUDE_LOCAL" != 1 ]; then log "skip (made on this Mac): $f"; continue; fi
         elif echo "$agent" | grep -qiE "$SKIP_AGENTS"; then
-            log "skip (from $agent): $f"; echo "$key" >> "$SEEN"; continue
+            log "skip (from $agent): $f"; continue
         fi
 
         # Wait for the copy to finish.
