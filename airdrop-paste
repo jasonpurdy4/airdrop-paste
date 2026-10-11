@@ -1,0 +1,124 @@
+#!/bin/bash
+# airdrop-paste — drop AirDropped images straight into the Claude prompt.
+#
+# Watches ~/Downloads. Each new image that arrived by AirDrop is pasted, as a
+# file path, into the Ghostty terminal you are looking at. Claude Code turns a
+# pasted image path into an attachment. Nothing is submitted: the path just
+# sits in the input box.
+#
+# Works the same inside tmux or out of it, because Ghostty does the paste.
+#
+# Started from your shell profile, NOT launchd, on purpose: macOS will not let a launchd
+# job read ~/Downloads ("Operation not permitted"), but anything started from a
+# Ghostty shell borrows Ghostty's permission. One copy runs at a time and it
+# exits when Ghostty quits.
+#
+# Log:   ~/Library/Logs/airdrop-paste.log
+# Stop:  airdrop-paste stop
+
+set -u
+
+WATCH="$HOME/Downloads"
+STATE="$HOME/Library/Caches/airdrop-paste"
+STAMP="$STATE/stamp"
+SEEN="$STATE/seen"
+PIDFILE="$STATE/pid"
+LOG="$HOME/Library/Logs/airdrop-paste.log"
+
+# Files with no quarantine tag were made on this Mac (its own screenshots,
+# exports). Set AIRDROP_PASTE_INCLUDE_LOCAL=1 to paste those too.
+INCLUDE_LOCAL="${AIRDROP_PASTE_INCLUDE_LOCAL:-0}"
+# Anything a browser or chat app downloaded is not an AirDrop.
+SKIP_AGENTS='Safari|Chrome|Firefox|Arc|Brave|Edge|Atlas|Slack|Mail|Messages|Discord|WhatsApp|Telegram|zoom'
+
+mkdir -p "$STATE"
+touch "$SEEN"
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"; }
+
+running_pid() {
+    local pid
+    pid=$(cat "$PIDFILE" 2>/dev/null) || return 1
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && ps -o command= -p "$pid" | grep -q airdrop-paste && echo "$pid"
+}
+
+if [ "${1:-}" = "stop" ]; then
+    pid=$(running_pid) && kill "$pid" && echo "stopped" || echo "not running"
+    exit 0
+fi
+
+running_pid >/dev/null && exit 0
+echo $$ > "$PIDFILE"
+
+scan() {
+    # Take the new stamp before scanning so a file landing mid-scan is caught next time.
+    local next="$STATE/stamp.next" paths="" f inode q agent prev size out esc err
+    touch "$next"
+
+    # ctime, not mtime: AirDrop keeps the photo's original modified date, but
+    # the inode change time is always when it landed here.
+    while IFS= read -r -d '' f; do
+        inode=$(stat -f '%i' "$f" 2>/dev/null) || continue
+        grep -qx "$inode" "$SEEN" && continue
+
+        q=$(xattr -p com.apple.quarantine "$f" 2>/dev/null)
+        # AirDrop writes the file first and tags it a moment later, so an
+        # untagged file gets one more look before it is called local.
+        if [ -z "$q" ]; then sleep 1; q=$(xattr -p com.apple.quarantine "$f" 2>/dev/null); fi
+        agent=$(echo "$q" | cut -d';' -f3)
+        if [ -z "$q" ]; then
+            if [ "$INCLUDE_LOCAL" != 1 ]; then log "skip (made on this Mac): $f"; echo "$inode" >> "$SEEN"; continue; fi
+        elif echo "$agent" | grep -qiE "$SKIP_AGENTS"; then
+            log "skip (from $agent): $f"; echo "$inode" >> "$SEEN"; continue
+        fi
+
+        # Wait for the copy to finish.
+        prev=-1
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            size=$(stat -f '%z' "$f" 2>/dev/null || echo 0)
+            [ "$size" = "$prev" ] && [ "$size" -gt 0 ] && break
+            prev=$size
+            sleep 0.3
+        done
+        echo "$inode" >> "$SEEN"
+
+        # Claude Code does not read HEIC, so hand it a JPEG instead.
+        case "$f" in
+            *.[hH][eE][iI][cC])
+                out="$STATE/$(basename "${f%.*}").jpg"
+                if sips -s format jpeg "$f" --out "$out" >/dev/null 2>&1; then f="$out"; else log "could not convert $f"; continue; fi
+                ;;
+        esac
+
+        log "paste (agent: ${agent:-none}): $f"
+        # Escape the way a Finder drag into a terminal does.
+        esc=$(printf '%s' "$f" | sed 's/[^A-Za-z0-9_.\/-]/\\&/g')
+        paths="$paths$esc "
+    done < <(find "$WATCH" -maxdepth 1 -type f \
+        \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.heic' -o -iname '*.gif' -o -iname '*.webp' \) \
+        -newercm "$STAMP" -print0 2>>"$LOG")
+
+    mv "$next" "$STAMP"
+    [ -z "$paths" ] && return
+
+    tail -n 500 "$SEEN" > "$SEEN.tmp" && mv "$SEEN.tmp" "$SEEN"
+    err=$(/usr/bin/osascript - "$paths" 2>&1 <<'EOF'
+on run argv
+    tell application "Ghostty"
+        input text (item 1 of argv) to focused terminal of selected tab of front window
+    end tell
+end run
+EOF
+    ) || log "paste failed: $err"
+}
+
+# Start the clock now so the existing backlog is never pasted.
+touch "$STAMP"
+log "watching $WATCH (pid $$)"
+trap 'rm -f "$PIDFILE"; log "stopped"; exit 0' TERM INT
+
+while pgrep -xq ghostty; do
+    scan
+    sleep 1
+done
+rm -f "$PIDFILE"
+log "Ghostty quit, stopping"
