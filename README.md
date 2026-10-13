@@ -4,6 +4,8 @@ AirDrop a screenshot from your phone and it appears in your terminal prompt, rea
 
 Built for [Claude Code](https://claude.com/claude-code): take a screenshot on your iPhone, AirDrop it to your Mac, and a second later it is attached to the prompt you are looking at. No dragging, no Finder, no keystrokes.
 
+It only pastes while a terminal is the app in front. An image that arrives while you are in a browser or anything else stays in `~/Downloads` and nothing is typed anywhere.
+
 ## Install
 
 ```bash
@@ -38,7 +40,7 @@ For the Cmd+V terminals:
 1. AirDrop saves every incoming file to `~/Downloads`.
 2. `airdrop-paste` looks at that folder once a second for image files that were not there a moment ago.
 3. macOS tags each downloaded file with the app that received it. AirDrop's tag is `sharingd`. Files tagged by a browser or chat app are skipped, and so are untagged files, which were made on the Mac itself.
-4. It also remembers which terminal app was last in front. Each AirDropped image's path is pasted there, using the method in the table above. Claude Code turns a pasted image path into an attachment.
+4. It checks which app is in front. If that is a terminal, each AirDropped image's path is pasted there, using the method in the table above, and Claude Code turns a pasted image path into an attachment. If it is any other app, the image is left alone.
 
 5. AirDrop opens a Finder window on the new file and takes focus with it. `airdrop-paste` closes that window and puts you back in the app you were using. macOS asks once for permission to control Finder.
 
@@ -55,6 +57,7 @@ A launchd job would be the tidy way to watch a folder, but macOS does not let ba
 | What | How |
 | --- | --- |
 | Also paste screenshots taken on the Mac | `export AIRDROP_PASTE_INCLUDE_LOCAL=1` in `~/.zshrc`, above the startup line |
+| Paste into the last terminal you used even when another app is in front | `export AIRDROP_PASTE_ALWAYS=1` in `~/.zshrc`, above the startup line |
 | Leave the AirDrop Finder window open | `export AIRDROP_PASTE_KEEP_FINDER=1` in `~/.zshrc`, above the startup line |
 | Stop it | `airdrop-paste stop` |
 | See what it did and why | `~/Library/Logs/airdrop-paste.log` |

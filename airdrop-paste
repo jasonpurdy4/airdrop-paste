@@ -1,10 +1,11 @@
 #!/bin/bash
 # airdrop-paste — drop AirDropped images straight into your terminal prompt.
 #
-# Watches ~/Downloads. Each new image that arrived by AirDrop is pasted, as a
-# file path, into the terminal you were last looking at. Claude Code (and most
-# coding agents) turn a pasted image path into an attachment. Nothing is
-# submitted: the path just sits in the input box.
+# Watches ~/Downloads. Each new image that arrived by AirDrop while a terminal
+# is the app in front is pasted, as a file path, into that terminal. Claude Code
+# (and most coding agents) turn a pasted image path into an attachment. Nothing
+# is submitted: the path just sits in the input box. An image that arrives while
+# you are in some other app is left alone.
 #
 # How the paste happens depends on the terminal:
 #   Ghostty, iTerm2   their own "type this text" command, no permissions needed
@@ -33,6 +34,12 @@ LOG="$HOME/Library/Logs/airdrop-paste.log"
 # Files with no quarantine tag were made on this Mac (its own screenshots,
 # exports). Set AIRDROP_PASTE_INCLUDE_LOCAL=1 to paste those too.
 INCLUDE_LOCAL="${AIRDROP_PASTE_INCLUDE_LOCAL:-0}"
+# Set AIRDROP_PASTE_ALWAYS=1 to paste into the last terminal you used even when
+# another app is in front.
+ALWAYS="${AIRDROP_PASTE_ALWAYS:-0}"
+# AirDrop pulls Finder forward as the file lands. Finder in front for no longer
+# than this many seconds counts as the app that was in front before it.
+FINDER_GRACE=10
 # Anything a browser or chat app downloaded is not an AirDrop.
 SKIP_AGENTS='Safari|Chrome|Firefox|Arc|Brave|Edge|Atlas|Slack|Mail|Messages|Discord|WhatsApp|Telegram|zoom'
 
@@ -75,6 +82,28 @@ while :; do
 done
 
 front_app() { lsappinfo info -only bundleid "$(lsappinfo front)" 2>/dev/null | cut -d'"' -f4; }
+
+# Remember the last terminal that was in front, the last app that was not
+# Finder, and when the app in front last changed.
+FRONT=""
+FRONT_SINCE=0
+LAST_TERM=""
+LAST_FRONT=""
+note_front() {
+    local front
+    front=$(front_app)
+    [ -n "$front" ] || return
+    if [ "$front" != "$FRONT" ]; then FRONT=$front; FRONT_SINCE=$(date +%s); fi
+    echo "$front" | grep -qxE "$TERMINALS" && LAST_TERM=$front
+    [ "$front" != com.apple.finder ] && LAST_FRONT=$front
+}
+
+terminal_in_front() {
+    note_front
+    echo "$FRONT" | grep -qxE "$TERMINALS" && return 0
+    [ "$FRONT" = com.apple.finder ] && [ $(( $(date +%s) - FRONT_SINCE )) -le "$FINDER_GRACE" ] \
+        && echo "$LAST_FRONT" | grep -qxE "$TERMINALS"
+}
 
 paste_ghostty() {
     /usr/bin/osascript - "$1" <<'EOF'
@@ -198,6 +227,10 @@ scan() {
             log "skip (from $agent): $f"; continue
         fi
 
+        if [ "$ALWAYS" != 1 ] && ! terminal_in_front; then
+            log "skip (no terminal in front, ${LAST_FRONT:-nothing} was): $f"; continue
+        fi
+
         # Wait for the copy to finish.
         prev=-1
         for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -240,14 +273,8 @@ touch "$STAMP"
 log "watching $WATCH (pid $$, started from $(ps -o comm= -p "$HOST" 2>/dev/null))"
 trap 'rm -f "$PIDFILE"; log "stopped"; exit 0' TERM INT
 
-LAST_TERM=""
-LAST_FRONT=""
 while kill -0 "$HOST" 2>/dev/null; do
-    # Remember the last terminal that was in front; AirDrop itself can pull
-    # Finder forward, so "frontmost right now" is not good enough.
-    front=$(front_app)
-    echo "$front" | grep -qxE "$TERMINALS" && LAST_TERM=$front
-    [ -n "$front" ] && [ "$front" != com.apple.finder ] && LAST_FRONT=$front
+    note_front
     scan
     sleep 1
 done
