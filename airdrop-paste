@@ -153,14 +153,16 @@ EOF
     return 0
 }
 
-# AirDrop opens a Finder window on the new file and takes focus with it. Close
-# that window (only if it is showing Downloads with our file selected) and hand
-# focus back to whatever was in front. AIRDROP_PASTE_KEEP_FINDER=1 leaves it alone.
-close_finder() {
+# AirDrop opens a Finder window on the new file and takes focus with it. Wait
+# for that window (Downloads with our file selected), then bring the terminal
+# back in front of it. The Finder window stays open behind. If it never shows
+# up, the terminal is raised anyway. AIRDROP_PASTE_KEEP_FINDER=1 leaves focus alone.
+raise_terminal() {
     local file=$1 back=$2 out
     [ "${AIRDROP_PASTE_KEEP_FINDER:-0}" = 1 ] && return
+    [ -n "$back" ] || return
     for _ in 1 2 3 4 5 6 7 8; do
-        out=$(/usr/bin/osascript - "$(basename "$file")" "$WATCH/" "$back" 2>&1 <<'EOF'
+        out=$(/usr/bin/osascript - "$(basename "$file")" "$WATCH/" 2>&1 <<'EOF'
 on run argv
     tell application "Finder"
         if (count of Finder windows) is 0 then return "waiting"
@@ -169,19 +171,21 @@ on run argv
         if (count of sel) is not 1 then return "waiting"
         if (name of item 1 of sel) is not (item 1 of argv) then return "waiting"
         if (POSIX path of (target of w as alias)) is not (item 2 of argv) then return "waiting"
-        close w
     end tell
-    if (item 3 of argv) is not "" then tell application id (item 3 of argv) to activate
-    return "closed"
+    return "found"
 end run
 EOF
         )
         case "$out" in
-            closed) return ;;
+            found) break ;;
             waiting) sleep 0.5 ;;
-            *) log "could not close the Finder window: $out"; return ;;
+            *) log "could not check the Finder window: $out"; break ;;
         esac
     done
+    # Finder can take focus a beat after its window appears.
+    sleep 0.3
+    /usr/bin/osascript -e "tell application id \"$back\" to activate" >/dev/null 2>&1 \
+        || log "could not bring $back to the front"
 }
 
 deliver() {
@@ -265,7 +269,7 @@ scan() {
 
     tail -n 500 "$SEEN" > "$SEEN.tmp" && mv "$SEEN.tmp" "$SEEN"
     deliver "$paths"
-    close_finder "$revealed" "$LAST_FRONT" &
+    raise_terminal "$revealed" "${LAST_TERM:-$LAST_FRONT}" &
 }
 
 # Start the clock now so the existing backlog is never pasted.
