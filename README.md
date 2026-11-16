@@ -13,9 +13,17 @@ git clone https://github.com/jasonpurdy4/airdrop-paste.git
 cd airdrop-paste && ./install.sh
 ```
 
-Open a new terminal tab and AirDrop an image to your Mac.
+It starts right away. AirDrop an image to your Mac to try it.
 
 Requires macOS and zsh.
+
+## Update
+
+```bash
+cd airdrop-paste && git pull && ./install.sh
+```
+
+The installer stops whatever copies are running and starts the new one. If every AirDrop has been pasting two or three times, this is the fix: before 2026-11-16, tabs that opened together (a terminal restoring its windows after a restart) could each start their own watcher.
 
 ## Where it works
 

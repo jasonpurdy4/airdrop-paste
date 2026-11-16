@@ -69,8 +69,12 @@ if [ "${1:-}" = "stop" ]; then
     exit 0
 fi
 
-running_pid >/dev/null && exit 0
-echo $$ > "$PIDFILE"
+# One copy at a time, claimed atomically. Reading the pid file and then
+# writing it let three copies through on 2026-11-15, when Ghostty restored
+# three tabs and each shell started one in the same second, so every AirDrop
+# pasted three times. shlock creates the file in one step, and clears a stale
+# one left by a copy that died.
+/usr/bin/shlock -f "$PIDFILE" -p $$ || exit 0
 
 # The app (or tmux server) this was started from: walk up to the last ancestor
 # before launchd. We live exactly as long as it does.
